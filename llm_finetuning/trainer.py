@@ -1,54 +1,94 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, Trainer as HfTrainer
 from peft import LoraConfig, get_peft_model
+from llm_finetuning.config import TrainingConfig
+from llm_finetuning.data_processor import LLMDataset
 
-class Trainer:
-    def __init__(self, model_name, dataset, config):
-        self.model_name = model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
-        self.dataset = dataset
+class LLMFineTuner:
+    def __init__(self, config: TrainingConfig):
         self.config = config
+        self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(config.model_name)
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-    def train(self):
-        print(f"Starting training for {self.model_name}...")
-        # Dummy training logic
+        # Configure LoRA
         lora_config = LoraConfig(
-            r=8,
-            lora_alpha=16,
-            target_modules=["q_proj", "v_proj"],
-            lora_dropout=0.05,
+            r=self.config.lora_r,
+            lora_alpha=self.config.lora_alpha,
+            target_modules=["q_proj", "v_proj"], # Common target modules for LLMs
+            lora_dropout=self.config.lora_dropout,
             bias="none",
             task_type="CAUSAL_LM",
         )
         self.model = get_peft_model(self.model, lora_config)
         self.model.print_trainable_parameters()
 
-        # Simulate data loading and processing
-        print("Processing dataset...")
-        # In a real scenario, this would involve tokenization and batching
-        dummy_input = self.tokenizer("Hello, world!", return_tensors="pt")
-        dummy_labels = dummy_input.input_ids
+        self.train_dataset = LLMDataset(self.config.dataset_path, self.config.model_name, self.config.max_seq_length)
 
-        # Simulate a training step
-        outputs = self.model(**dummy_input, labels=dummy_labels)
-        loss = outputs.loss
-        print(f"Simulated loss: {loss.item()}")
-        print("Training complete!")
+    def train(self):
+        print(f"\n--- Starting LLM Fine-Tuning for {self.config.model_name} ---")
+        self.config.display_config()
 
-class CustomDataset:
-    def __init__(self, data_path):
-        self.data_path = data_path
-        print(f"Loading dataset from {data_path}")
-        # Simulate dataset loading
-        self.data = ["sample text 1", "sample text 2"]
+        training_args = TrainingArguments(
+            output_dir=self.config.output_dir,
+            learning_rate=self.config.learning_rate,
+            num_train_epochs=self.config.num_train_epochs,
+            per_device_train_batch_size=self.config.per_device_train_batch_size,
+            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+            save_steps=self.config.save_steps,
+            logging_steps=self.config.logging_steps,
+            report_to="none", # Disable reporting to external services for this example
+            remove_unused_columns=False, # Keep columns for data processing
+        )
 
-    def __len__(self):
-        return len(self.data)
+        trainer = HfTrainer(
+            model=self.model,
+            args=training_args,
+            train_dataset=self.train_dataset,
+            tokenizer=self.tokenizer,
+            data_collator=self._data_collator, # Custom data collator if needed
+        )
 
-    def __getitem__(self, idx):
-        return self.data[idx]
+        trainer.train()
+        print("\n--- LLM Fine-Tuning Complete! ---")
+
+    def _data_collator(self, features):
+        # A simple data collator for demonstration. In a real scenario, you might need more complex padding.
+        batch = {}
+        batch["input_ids"] = torch.stack([f["input_ids"] for f in features])
+        batch["attention_mask"] = torch.stack([f["attention_mask"] for f in features])
+        batch["labels"] = torch.stack([f["labels"] for f in features])
+        return batch
+
+# Example usage:
+if __name__ == "__main__":
+    # Ensure dummy data exists for testing
+    import os
+    import json
+    os.makedirs("data", exist_ok=True)
+    with open("data/custom_dataset.json", "w", encoding="utf-8") as f:
+        dummy_data = [
+            {"text": "This is a sample sentence for fine-tuning.", "target_text": "Sample output."},
+            {"text": "Another example for the LLM.", "target_text": "Another output."},
+            {"text": "A third sentence to test the model.", "target_text": "Third output."},
+            {"text": "The quick brown fox jumps over the lazy dog.", "target_text": "A fox jumps over a dog."},
+            {"text": "Artificial intelligence is rapidly advancing.", "target_text": "AI is advancing."},
+            {"text": "This is a test sentence for causal language modeling.", "target_text": None}
+        ]
+        for entry in dummy_data:
+            f.write(json.dumps(entry) + "\n")
+
+    config = TrainingConfig()
+    # For demonstration, let's set a smaller batch size and fewer epochs
+    config.per_device_train_batch_size = 2
+    config.num_train_epochs = 1
+    config.model_name = "gpt2"
+
+    finetuner = LLMFineTuner(config)
+    finetuner.train()
+
+    # Clean up dummy data
+    os.remove("data/custom_dataset.json")
+    os.rmdir("data")
